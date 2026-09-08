@@ -1,0 +1,122 @@
+services:
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: host-monitor-app
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - host-monitor-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: host-monitor-nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - .:/var/www/html
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+    networks:
+      - host-monitor-network
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: host-monitor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-host_monitor}
+      POSTGRES_USER: ${DB_USERNAME:-host_monitor}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-host_monitor}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U host_monitor -d host_monitor"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - host-monitor-network
+
+  redis:
+    image: redis:8-alpine
+    container_name: host-monitor-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - host-monitor-network
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: host-monitor-scheduler
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: php artisan schedule:work
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - host-monitor-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: host-monitor-worker
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: >
+      php artisan queue:work redis
+      --queue=checks,notifications
+      --sleep=1
+      --tries=3
+      --timeout=30
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - host-monitor-network
+
+networks:
+  host-monitor-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
